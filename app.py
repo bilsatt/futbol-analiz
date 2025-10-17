@@ -1,454 +1,280 @@
-import streamlit as st
-import requests
-import json
-import pandas as pd
-import math
-from datetime import datetime, timedelta
-import plotly.graph_objects as go
-import plotly.express as px
+import math, requests, numpy as np, pandas as pd, streamlit as st, plotly.express as px
+from datetime import datetime
 
-# Sayfa ayarları
-st.set_page_config(
-    page_title="Futbol Analiz Uygulaması",
-    page_icon="⚽",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# ======================================================
+# ⚽ API AYARLARI (MOBİL/CLOUD SÜRÜMÜ – Excel YOK)
+# ======================================================
+API_KEY = "d879308f24518901a28a73d174fa6a12"
+BASE_URL = "https://v3.football.api-sports.io"
+HEADERS = {"x-apisports-key": API_KEY, "User-Agent": "Mozilla/5.0"}
 
-# CSS stilleri
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .analysis-card {
-        background-color: #f0f2f6;
-        padding: 1.5rem;
-        border-radius: 10px;
-        margin-bottom: 1rem;
-        border-left: 5px solid #1f77b4;
-    }
-    .probability-bar {
-        height: 25px;
-        border-radius: 5px;
-        margin: 5px 0;
-    }
-    .team-form {
-        font-size: 1.2rem;
-        font-weight: bold;
-    }
-    .positive { color: #28a745; }
-    .negative { color: #dc3545; }
-    .neutral { color: #ffc107; }
-</style>
-""", unsafe_allow_html=True)
-
-class APIFootballClient:
-    def __init__(self):
-        self.base_url = "https://v3.football.api-sports.io"
-        self.headers = {
-            'x-rapidapi-host': 'v3.football.api-sports.io',
-            'x-rapidapi-key': st.secrets.get("API_FOOTBALL_KEY", "")
-        }
-    
-    def make_request(self, endpoint, params=None):
-        try:
-            url = f"{self.base_url}/{endpoint}"
-            response = requests.get(url, headers=self.headers, params=params, timeout=10)
-            return response.json() if response.status_code == 200 else None
-        except:
-            return None
-
-class FootballAnalyzer:
-    def __init__(self):
-        self.client = APIFootballClient()
-    
-    def get_countries(self):
-        """Ülke listesini getir"""
-        data = self.client.make_request("countries")
-        if data and 'response' in data:
-            return {item['name']: item['code'] for item in data['response']}
-        return {}
-    
-    def get_leagues(self, country):
-        """Lig listesini getir"""
-        params = {'country': country}
-        data = self.client.make_request("leagues", params)
-        if data and 'response' in data:
-            leagues = {}
-            for league in data['response']:
-                league_info = league['league']
-                leagues[league_info['name']] = {
-                    'id': league_info['id'],
-                    'season': league['seasons'][0]['year']
-                }
-            return leagues
-        return {}
-    
-    def get_teams(self, league_name):
-        """Takım listesini getir"""
-        leagues = st.session_state.get('leagues', {})
-        if league_name not in leagues:
-            return {}
-        
-        league_id = leagues[league_name]['id']
-        season = leagues[league_name]['season']
-        
-        params = {'league': league_id, 'season': season}
-        data = self.client.make_request("teams", params)
-        
-        if data and 'response' in data:
-            teams = {}
-            for team in data['response']:
-                team_info = team['team']
-                teams[team_info['name']] = {
-                    'id': team_info['id'],
-                    'code': team_info.get('code', 'N/A')
-                }
-            return teams
-        return {}
-    
-    def get_team_form(self, team_name, league_name, matches=5):
-        """Takım formunu getir"""
-        leagues = st.session_state.get('leagues', {})
-        teams = st.session_state.get('teams', {})
-        
-        if team_name not in teams or league_name not in leagues:
-            return []
-        
-        team_id = teams[team_name]['id']
-        league_id = leagues[league_name]['id']
-        season = leagues[league_name]['season']
-        
-        params = {'team': team_id, 'league': league_id, 'season': season, 'last': matches}
-        data = self.client.make_request("fixtures", params)
-        
-        if data and 'response' in data:
-            form = []
-            for match in data['response']:
-                home_team = match['teams']['home']['name']
-                away_team = match['teams']['away']['name']
-                home_goals = match['goals']['home']
-                away_goals = match['goals']['away']
-                
-                if team_name == home_team:
-                    if home_goals > away_goals: form.append('W')
-                    elif home_goals == away_goals: form.append('D')
-                    else: form.append('L')
-                else:
-                    if away_goals > home_goals: form.append('W')
-                    elif away_goals == home_goals: form.append('D')
-                    else: form.append('L')
-            return form
+# ======================================================
+# 🔧 Yardımcı Fonksiyonlar
+# ======================================================
+@st.cache_data(ttl=600)
+def get_data(endpoint, params=None):
+    try:
+        r = requests.get(f"{BASE_URL}/{endpoint}", headers=HEADERS, params=params, timeout=20)
+        if r.status_code == 200:
+            return r.json().get("response", [])
         return []
-    
-    def get_head_to_head(self, team1, team2, matches=5):
-        """Kafa kafaya geçmiş"""
-        teams = st.session_state.get('teams', {})
-        if team1 not in teams or team2 not in teams:
-            return []
-        
-        team1_id = teams[team1]['id']
-        team2_id = teams[team2]['id']
-        
-        params = {'h2h': f"{team1_id}-{team2_id}", 'last': matches}
-        data = self.client.make_request("fixtures/headtohead", params)
-        
-        if data and 'response' in data:
-            history = []
-            for match in data['response']:
-                history.append({
-                    'date': match['fixture']['date'][:10],
-                    'home_team': match['teams']['home']['name'],
-                    'away_team': match['teams']['away']['name'],
-                    'score': f"{match['goals']['home']}-{match['goals']['away']}"
-                })
-            return history
+    except Exception:
         return []
-    
-    def calculate_probabilities(self, home_team, away_team, home_form, away_form, history):
-        """Olasılık hesapları"""
-        # Form puanı hesapla
-        def form_score(form):
-            points = {'W': 3, 'D': 1, 'L': 0}
-            return sum(points.get(result, 0) for result in form) / (len(form) * 3) if form else 0.5
-        
-        home_form_score = form_score(home_form)
-        away_form_score = form_score(away_form)
-        
-        # Ev avantajı
-        home_advantage = 1.15
-        
-        # Gol beklentileri
-        home_goal_expectancy = (home_form_score * 2.0 + 0.5) * home_advantage
-        away_goal_expectancy = away_form_score * 1.5 + 0.3
-        
-        # Olasılıklar
-        home_strength = home_form_score * home_advantage
-        away_strength = away_form_score
-        
-        total_strength = home_strength + away_strength
-        home_win = (home_strength / total_strength) * 60
-        draw = 25
-        away_win = (away_strength / total_strength) * 40
-        
-        # Normalize
-        total = home_win + draw + away_win
-        home_win_pct = (home_win / total) * 100
-        draw_pct = (draw / total) * 100
-        away_win_pct = (away_win / total) * 100
-        
-        return {
-            'probabilities': {
-                'home_win': round(home_win_pct, 1),
-                'draw': round(draw_pct, 1),
-                'away_win': round(away_win_pct, 1)
-            },
-            'goal_expectancies': {
-                'home': round(home_goal_expectancy, 2),
-                'away': round(away_goal_expectancy, 2)
-            },
-            'form_scores': {
-                'home': round(home_form_score * 100, 1),
-                'away': round(away_form_score * 100, 1)
+
+def safe_div(a, b): return a / b if b else 0
+def poisson_p(k, lam): return math.exp(-lam) * (lam ** k) / math.factorial(k)
+
+def poisson_matrix(lh, la, max_g=6):
+    M = np.zeros((max_g + 1, max_g + 1))
+    for i in range(max_g + 1):
+        for j in range(max_g + 1):
+            M[i, j] = poisson_p(i, lh) * poisson_p(j, la)
+    return M
+
+def over25_prob(M):
+    # toplam gol > 2.5
+    totals = np.add.outer(np.arange(M.shape[0]), np.arange(M.shape[1]))
+    return M[totals > 2.5].sum()
+
+def btts_prob(M):
+    p = 0.0
+    for i in range(1, M.shape[0]):
+        for j in range(1, M.shape[1]):
+            p += M[i, j]
+    return p
+
+def wdl_from_poisson(M):
+    ph = pdx = pa = 0.0
+    for i in range(M.shape[0]):
+        for j in range(M.shape[1]):
+            if i > j: ph += M[i, j]
+            elif i == j: pdx += M[i, j]
+            else: pa += M[i, j]
+    return ph, pdx, pa
+
+def team_form(fixtures, team_id):
+    W = D = L = 0
+    gf = ga = 0
+    for f in fixtures:
+        goals = f.get("goals", {}) or {}
+        if goals == {}: continue
+        is_home = f.get("teams", {}).get("home", {}).get("id") == team_id
+        gfor = goals.get("home") if is_home else goals.get("away")
+        gagt = goals.get("away") if is_home else goals.get("home")
+        gfor = gfor if isinstance(gfor, (int, float)) and gfor is not None else 0
+        gagt = gagt if isinstance(gagt, (int, float)) and gagt is not None else 0
+        gf += gfor; ga += gagt
+        if gfor > gagt: W += 1
+        elif gfor == gagt: D += 1
+        else: L += 1
+    n = len(fixtures) if fixtures else 1
+    return {"W": W, "D": D, "L": L, "avgGF": safe_div(gf, n), "avgGA": safe_div(ga, n)}
+
+def _to_float(x):
+    try:
+        s = str(x).strip()
+        if s.endswith("%"): s = s.replace("%", "")
+        return float(s)
+    except:
+        return 0.0
+
+def _extract_xg_from_statistics_block(stat_map: dict):
+    if not stat_map: return 0.0
+    for k, v in (stat_map or {}).items():
+        key = (k or "").lower()
+        if "xg" in key or ("expected" in key and "goal" in key):
+            return _to_float(v)
+    return 0.0
+
+def safe_get(d, key):
+    val = d.get(key)
+    return val if val not in [None, "null", "None", ""] else "Veri yok"
+
+# ======================================================
+# 🧠 Streamlit Başlangıç
+# ======================================================
+st.set_page_config(page_title="⚽ Analiz + Canlı (Full v4)", layout="wide")
+st.title("⚽ Futbol Analiz (Poisson) + Canlı xG / Atak Yorum – Full v4")
+st.caption("💾 Bu sürümde Excel kaydı devre dışı (mobil/Cloud uyumlu).")
+
+# ======================================================
+# 🗂️ Sekmeler
+# ======================================================
+tab1, tab2 = st.tabs(["📊 Maç Analizi", "📡 Canlı Analiz"])
+
+# ======================================================
+# 📊 TAB 1: Maç Analizi (Poisson)
+# ======================================================
+with tab1:
+    countries = get_data("countries")
+    country_names = sorted([c["name"] for c in countries])
+    country = st.selectbox("Ülke Seç", ["Seçiniz"] + country_names, key="an_country")
+
+    league_dict = {}
+    if country != "Seçiniz":
+        leagues = get_data("leagues", {"country": country, "season": datetime.now().year})
+        league_dict = {l["league"]["name"]: l["league"]["id"] for l in leagues}
+        league = st.selectbox("Lig Seç", ["Seçiniz"] + list(league_dict.keys()), key="an_league")
+    else:
+        league = "Seçiniz"
+
+    team_dict = {}
+    if league != "Seçiniz":
+        lid = league_dict[league]
+        teams = get_data("teams", {"league": lid, "season": datetime.now().year})
+        if not teams:
+            teams = get_data("teams", {"league": lid, "season": datetime.now().year - 1})
+        team_dict = {t["team"]["name"]: t["team"]["id"] for t in teams}
+
+    col1, col2 = st.columns(2)
+    home_team = col1.selectbox("Ev Takımı", ["Seçiniz"] + list(team_dict.keys()), key="an_home")
+    away_team = col2.selectbox("Deplasman Takımı", ["Seçiniz"] + list(team_dict.keys()), key="an_away")
+
+    if home_team != "Seçiniz" and away_team != "Seçiniz" and st.button("🔍 Analiz Et", key="an_btn"):
+        hid = team_dict[home_team]; aid = team_dict[away_team]
+        home_fix = get_data("fixtures", {"team": hid, "last": 10})
+        away_fix = get_data("fixtures", {"team": aid, "last": 10})
+
+        H = team_form(home_fix, hid); A = team_form(away_fix, aid)
+
+        lam_home = max(0.2, (H["avgGF"] + A["avgGA"]) / 2) * 1.1
+        lam_away = max(0.2, (A["avgGF"] + H["avgGA"]) / 2)
+
+        M = poisson_matrix(lam_home, lam_away, max_g=6)
+        ph, pdraw, pa = wdl_from_poisson(M)
+        over25 = over25_prob(M)
+        btts = btts_prob(M)
+
+        df = pd.DataFrame({
+            "Sonuç": ["Ev (1)", "Beraberlik (0)", "Dep (2)"],
+            "Olasılık (%)": [ph*100, pdraw*100, pa*100]
+        })
+        st.subheader("📊 Maç Sonucu Olasılıkları")
+        st.plotly_chart(px.bar(df, x="Sonuç", y="Olasılık (%)", color="Sonuç"), use_container_width=True)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Üst 2.5", f"{over25*100:.1f}%")
+        c2.metric("Alt 2.5", f"{(1-over25)*100:.1f}%")
+        c3.metric("KG Var", f"{btts*100:.1f}%")
+        c4.metric("KG Yok", f"{(1-btts)*100:.1f}%")
+
+        st.caption("ℹ️ Formül: Ev/Dep gol ortalamaları → Poisson; sonuç ve gollü/karşılıklı ihtimaller hesaplanır.")
+
+# ======================================================
+# 📡 TAB 2: Canlı Analiz (Skor + xG + Yorum)
+# ======================================================
+with tab2:
+    st.markdown("Gerçek zamanlı veriler lig ve sağlayıcıya göre gecikmeli gelebilir.")
+    if st.button("Canlı Maçları Listele", key="lv_list"):
+        st.session_state["live_active"] = True
+
+    if st.session_state.get("live_active"):
+        live_fixtures = get_data("fixtures", {"live": "all"})
+        if not live_fixtures:
+            st.warning("Şu anda canlı maç yok.")
+        else:
+            live_matches = {
+                f"{f['teams']['home']['name']} vs {f['teams']['away']['name']} ({f['league']['name']})": f["fixture"]["id"]
+                for f in live_fixtures
             }
-        }
+            sel = st.selectbox("Canlı Maç Seç", ["Seçiniz"] + list(live_matches.keys()), key="lv_pick")
 
-def main():
-    # Başlık
-    st.markdown('<div class="main-header">⚽ Profesyonel Futbol Analiz Uygulaması</div>', unsafe_allow_html=True)
-    
-    # Sidebar - API Key
-    with st.sidebar:
-        st.header("⚙️ Ayarlar")
-        
-        api_key = st.text_input("API Football Key", type="password", 
-                               help="rapidapi.com/api-sports sitesinden alabilirsiniz")
-        
-        if api_key:
-            st.success("✅ API Key tanımlandı")
-            if 'api_client' not in st.session_state:
-                st.session_state.api_client = APIFootballClient()
-                st.session_state.api_client.headers['x-rapidapi-key'] = api_key
-                st.session_state.analyzer = FootballAnalyzer()
-        else:
-            st.warning("🔑 Lütfen API key girin")
-            return
-    
-    # Analiz bölümü
-    analyzer = st.session_state.get('analyzer')
-    if not analyzer:
-        st.info("Lütfen sidebar'dan API key girin")
-        return
-    
-    # Ülke, Lig, Takım seçimi
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        if 'countries' not in st.session_state:
-            st.session_state.countries = analyzer.get_countries()
-        
-        countries = list(st.session_state.countries.keys())
-        selected_country = st.selectbox("🌍 Ülke Seçin", countries, key="country_select")
-        
-        if selected_country:
-            st.session_state.leagues = analyzer.get_leagues(selected_country)
-    
-    with col2:
-        if 'leagues' in st.session_state:
-            leagues = list(st.session_state.leagues.keys())
-            selected_league = st.selectbox("🏆 Lig Seçin", leagues, key="league_select")
-            
-            if selected_league:
-                st.session_state.teams = analyzer.get_teams(selected_league)
-    
-    with col3:
-        if 'teams' in st.session_state:
-            teams = list(st.session_state.teams.keys())
-            
-            selected_home_team = st.selectbox("🏠 Ev Takımı", teams, key="home_team_select")
-            selected_away_team = st.selectbox("✈️ Deplasman Takımı", teams, key="away_team_select")
-    
-    # Analiz butonu
-    if st.button("🎯 Maç Analizi Yap", type="primary", use_container_width=True):
-        if selected_home_team and selected_away_team and selected_home_team != selected_away_team:
-            with st.spinner("Veriler yükleniyor ve analiz yapılıyor..."):
-                # Verileri getir
-                home_form = analyzer.get_team_form(selected_home_team, selected_league)
-                away_form = analyzer.get_team_form(selected_away_team, selected_league)
-                h2h_history = analyzer.get_head_to_head(selected_home_team, selected_away_team)
-                
-                # Analiz yap
-                analysis = analyzer.calculate_probabilities(
-                    selected_home_team, selected_away_team, home_form, away_form, h2h_history
-                )
-                
-                # Sonuçları göster
-                display_analysis_results(selected_home_team, selected_away_team, 
-                                       home_form, away_form, h2h_history, analysis)
-        else:
-            st.error("Lütfen farklı iki takım seçin")
+            if sel != "Seçiniz" and st.button("🔄 Güncelle", key="lv_refresh"):
+                fid = live_matches[sel]
 
-def display_analysis_results(home_team, away_team, home_form, away_form, history, analysis):
-    """Analiz sonuçlarını göster"""
-    
-    # Başlık
-    st.markdown(f"## 📊 {home_team} vs {away_team} Analiz Raporu")
-    
-    # İki sütunlu layout
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Form analizi
-        st.subheader("📈 Form Durumu")
-        
-        col1a, col1b = st.columns(2)
-        with col1a:
-            display_team_form(home_team, home_form, analysis['form_scores']['home'])
-        with col1b:
-            display_team_form(away_team, away_form, analysis['form_scores']['away'])
-        
-        # Karşılaşma geçmişi
-        if history:
-            st.subheader("📜 Son Karşılaşmalar")
-            history_df = pd.DataFrame(history)
-            st.dataframe(history_df, use_container_width=True)
-    
-    with col2:
-        # Olasılık grafiği
-        st.subheader("🎲 Maç Sonuç Olasılıkları")
-        display_probability_chart(analysis['probabilities'], home_team, away_team)
-        
-        # Gol beklentileri
-        st.subheader("⚽ Gol Beklentileri")
-        display_goal_expectancies(analysis['goal_expectancies'], home_team, away_team)
-    
-    # Tavsiyeler
-    st.subheader("💡 Analiz Tavsiyeleri")
-    display_recommendations(analysis, home_team, away_team)
-    
-    # Detaylı analiz
-    with st.expander("🔍 Detaylı İstatistikler"):
-        display_detailed_stats(analysis, home_team, away_team)
+                # Skor + dakika
+                meta = get_data("fixtures", {"id": fid})
+                if meta:
+                    m = meta[0]
+                    hname = m["teams"]["home"]["name"]
+                    aname = m["teams"]["away"]["name"]
+                    hgoals = m["goals"]["home"]
+                    agoals = m["goals"]["away"]
+                    minute = m["fixture"]["status"].get("elapsed", 0) or 0
+                    st.markdown(f"### 🕒 Dakika {minute} — Skor: **{hname} {hgoals} - {agoals} {aname}**")
 
-def display_team_form(team_name, form, score):
-    """Takım formunu göster"""
-    form_display = "".join(form) if form else "Veri yok"
-    form_color = "positive" if score > 60 else "negative" if score < 40 else "neutral"
-    
-    st.markdown(f"""
-    <div class="analysis-card">
-        <div class="team-form {form_color}">{team_name}</div>
-        <div>Form: <strong>{form_display}</strong></div>
-        <div>Form Puanı: <strong>{score}/100</strong></div>
-    </div>
-    """, unsafe_allow_html=True)
+                # İstatistikler
+                stats = get_data("fixtures/statistics", {"fixture": fid})
+                if not stats:
+                    st.info("Bu maç için istatistik bulunamadı (sağlayıcı gecikmeli olabilir).")
+                else:
+                    stat_map = {t["team"]["name"]: {i["type"]: i["value"] for i in t["statistics"]} for t in stats}
+                    if len(stat_map) < 2:
+                        st.info("İstatistikler eksik görünüyor.")
+                    else:
+                        hname, aname = list(stat_map.keys())
+                        Hs, As = stat_map[hname], stat_map[aname]
+                        hxg = _extract_xg_from_statistics_block(Hs)
+                        axg = _extract_xg_from_statistics_block(As)
 
-def display_probability_chart(probabilities, home_team, away_team):
-    """Olasılık grafiğini göster"""
-    fig = go.Figure()
-    
-    outcomes = [f"{home_team} Galibiyeti", "Beraberlik", f"{away_team} Galibiyeti"]
-    probs = [probabilities['home_win'], probabilities['draw'], probabilities['away_win']]
-    colors = ['#28a745', '#ffc107', '#dc3545']
-    
-    fig.add_trace(go.Bar(
-        x=outcomes,
-        y=probs,
-        marker_color=colors,
-        text=[f'{p}%' for p in probs],
-        textposition='auto',
-    ))
-    
-    fig.update_layout(
-        title="Maç Sonuç Olasılıkları",
-        xaxis_title="Sonuçlar",
-        yaxis_title="Olasılık (%)",
-        showlegend=False,
-        height=300
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
+                        colA, colB = st.columns(2)
+                        with colA:
+                            st.subheader(hname)
+                            st.metric("Topa Sahip Olma", safe_get(Hs, "Ball Possession"))
+                            st.metric("Toplam Şut",  safe_get(Hs, "Total Shots"))
+                            st.metric("Korner",      safe_get(Hs, "Corner Kicks"))
+                            st.metric("Atak",        safe_get(Hs, "Attacks"))
+                            st.metric("Tehlikeli Atak", safe_get(Hs, "Dangerous Attacks"))
+                            st.metric("xG", f"{hxg:.2f}" if hxg>0 else "Veri yok")
+                        with colB:
+                            st.subheader(aname)
+                            st.metric("Topa Sahip Olma", safe_get(As, "Ball Possession"))
+                            st.metric("Toplam Şut",  safe_get(As, "Total Shots"))
+                            st.metric("Korner",      safe_get(As, "Corner Kicks"))
+                            st.metric("Atak",        safe_get(As, "Attacks"))
+                            st.metric("Tehlikeli Atak", safe_get(As, "Dangerous Attacks"))
+                            st.metric("xG", f"{axg:.2f}" if axg>0 else "Veri yok")
 
-def display_goal_expectancies(expectancies, home_team, away_team):
-    """Gol beklentilerini göster"""
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.metric(
-            label=f"{home_team} Gol Beklentisi",
-            value=expectancies['home'],
-            delta=None
-        )
-    
-    with col2:
-        st.metric(
-            label=f"{away_team} Gol Beklentisi",
-            value=expectancies['away'],
-            delta=None
-        )
-    
-    total_goals = expectancies['home'] + expectancies['away']
-    st.metric(
-        label="Toplam Gol Beklentisi",
-        value=f"{total_goals:.2f}",
-        delta="Üst 2.5" if total_goals > 2.5 else "Alt 2.5"
-    )
+                        # Farklar (ev - dep)
+                        pos_diff     = _to_float(Hs.get("Ball Possession", 0)) - _to_float(As.get("Ball Possession", 0))
+                        shots_diff   = _to_float(Hs.get("Total Shots", 0))    - _to_float(As.get("Total Shots", 0))
+                        corners_diff = _to_float(Hs.get("Corner Kicks", 0))   - _to_float(As.get("Corner Kicks", 0))
+                        attacks_diff = _to_float(Hs.get("Attacks", 0))        - _to_float(As.get("Attacks", 0))
+                        danger_diff  = _to_float(Hs.get("Dangerous Attacks", 0)) - _to_float(As.get("Dangerous Attacks", 0))
+                        xg_diff      = hxg - axg
 
-def display_recommendations(analysis, home_team, away_team):
-    """Tavsiyeleri göster"""
-    recommendations = []
-    probs = analysis['probabilities']
-    goals = analysis['goal_expectancies']
-    
-    # Sonuç tavsiyeleri
-    if probs['home_win'] > 55:
-        recommendations.append(f"✅ **{home_team} galibiyeti** (Yüksek güven)")
-        recommendations.append("✅ **Ev takımı -0.5 handicap**")
-    elif probs['away_win'] > 50:
-        recommendations.append(f"✅ **{away_team} galibiyeti**")
-        recommendations.append("✅ **Deplasman takımı +0.5 handicap**")
-    else:
-        recommendations.append("⚠️ **Beraberlik veya tek gol farkı**")
-        recommendations.append("✅ **Çifte şans (1X veya X2)**")
-    
-    # Gol tavsiyeleri
-    total_goals = goals['home'] + goals['away']
-    if total_goals > 2.5:
-        recommendations.append("✅ **Toplam gol üst 2.5**")
-    else:
-        recommendations.append("✅ **Toplam gol alt 2.5**")
-    
-    # İki takım gol
-    if goals['home'] > 0.8 and goals['away'] > 0.8:
-        recommendations.append("✅ **İki takım da gol atar (GG)**")
-    else:
-        recommendations.append("⚠️ **İki takım gol (GG) riskli**")
-    
-    # Tavsiyeleri göster
-    for rec in recommendations:
-        st.write(rec)
+                        # Gol olasılığı (geliştirilmiş skor)
+                        score = (
+                            (shots_diff   * 2.0) +
+                            (pos_diff     * 0.4) +
+                            (corners_diff * 1.2) +
+                            (attacks_diff * 0.5) +
+                            (danger_diff  * 1.0) +
+                            (xg_diff      * 15.0)
+                        )
+                        home_prob = max(0, min(100, 50 + score/2))
+                        away_prob = 100 - home_prob
 
-def display_detailed_stats(analysis, home_team, away_team):
-    """Detaylı istatistikleri göster"""
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric("Ev Takımı Form Gücü", f"{analysis['form_scores']['home']}/100")
-        st.metric("Ev Gol Beklentisi", analysis['goal_expectancies']['home'])
-    
-    with col2:
-        st.metric("Deplasman Form Gücü", f"{analysis['form_scores']['away']}/100")
-        st.metric("Deplasman Gol Beklentisi", analysis['goal_expectancies']['away'])
-    
-    with col3:
-        st.metric("Toplam Gol Beklentisi", 
-                 f"{analysis['goal_expectancies']['home'] + analysis['goal_expectancies']['away']:.2f}")
-        st.metric("Gol Farkı", 
-                 f"{analysis['goal_expectancies']['home'] - analysis['goal_expectancies']['away']:+.2f}")
+                        st.subheader("🎯 Gol Olasılığı")
+                        st.markdown(f"**{hname} % {home_prob:.1f}** — **{aname} % {away_prob:.1f}**")
 
-if __name__ == "__main__":
-    main()
+                        # 🔊 Akıllı yorum (veri az olsa da yazar)
+                        comments = []
+                        if danger_diff > 5:
+                            comments.append("Ev takımı tehlikeli ataklarda üstün, gol ihtimali artıyor.")
+                        elif danger_diff < -5:
+                            comments.append("Deplasman tehlikeli ataklarda daha üretken.")
+                        if attacks_diff > 10:
+                            comments.append("Ev takımı hücumda baskın.")
+                        elif attacks_diff < -10:
+                            comments.append("Deplasman hücum baskısı kuruyor.")
+                        if xg_diff > 0.3:
+                            comments.append("Ev takımının xG değeri yüksek, gol beklenebilir.")
+                        elif xg_diff < -0.3:
+                            comments.append("Deplasman’ın xG değeri yüksek, gol gelebilir.")
+                        if shots_diff > 3:
+                            comments.append("Ev takımı daha fazla şut çekiyor.")
+                        elif shots_diff < -3:
+                            comments.append("Deplasman daha fazla şut çekiyor.")
+                        if pos_diff > 10:
+                            comments.append("Ev takımı oyunu kontrol ediyor.")
+                        elif pos_diff < -10:
+                            comments.append("Deplasman topa daha çok sahip.")
+                        if corners_diff > 2:
+                            comments.append("Ev takımının korner sayısı artıyor, baskı kuruyor.")
+                        # her durumda en az bir yorum
+                        if not comments or all(abs(x) < 1 for x in [pos_diff, shots_diff, corners_diff, attacks_diff, danger_diff, xg_diff]):
+                            comments.append("Maç sakin, tempo düşük; oyun genel olarak dengede.")
+
+                        st.markdown("### 🧠 Yorum: " + " ".join(comments))
+                        st.caption("Not: Bazı liglerde Attacks/Dangerous Attacks verileri sağlanmayabilir; gelen veri anlık sağlayıcı kapsamına bağlıdır.")
